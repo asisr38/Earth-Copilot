@@ -576,16 +576,6 @@ jobs:
             
             echo "Container App created with placeholder image: $CA_NAME"
             
-            # Ensure ingress target port matches the container app's port
-            echo "Setting ingress target port to 8080..."
-            az containerapp ingress update \
-              --name "$CA_NAME" \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
-              --target-port 8080 \
-              --output none
-            
-            echo "Ingress target port set to 8080"
-            
             # STEP 2: Get the managed identity principal ID (now that app exists)
             CA_IDENTITY=$(az containerapp show --name "$CA_NAME" --resource-group ${{ env.RESOURCE_GROUP }} --query "identity.principalId" -o tsv)
             echo "Managed Identity Principal ID: $CA_IDENTITY"
@@ -677,6 +667,13 @@ jobs:
               --name "$CA_NAME" \
               --resource-group "${{ env.RESOURCE_GROUP }}" \
               --image "${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:${IMAGE_TAG}" \
+              --output none
+
+            echo "Setting ingress target port to 8080..."
+            az containerapp ingress update \
+              --name "$CA_NAME" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --target-port 8080 \
               --output none
             
             echo "Container App updated with image: ${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:${IMAGE_TAG}"
