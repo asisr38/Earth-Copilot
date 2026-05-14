@@ -89,7 +89,7 @@ resource gpt4oMiniDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
   parent: aiFoundry
   name: 'gpt-4o-mini'
   sku: {
-    name: 'Standard'
+    name: 'GlobalStandard'
     capacity: 10  // 10K TPM — conservative default to avoid quota failures on new subscriptions
   }
   properties: {
