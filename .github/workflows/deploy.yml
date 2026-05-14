@@ -320,6 +320,10 @@ jobs:
           
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           IMAGE_TAG="$TIMESTAMP"
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "loginServer" -o tsv)
           
           # ── Build image ────────────────────────────────────────────────
           # ACR has defaultAction: Deny for production security.
@@ -340,6 +344,18 @@ jobs:
           fi
           
           build_image() {
+            docker_build_push() {
+              echo "Building image on GitHub runner and pushing to ACR..."
+              az acr login --name "$ACR_NAME" --only-show-errors
+              docker build \
+                --file Dockerfile.complete \
+                --tag "${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:$IMAGE_TAG" \
+                --tag "${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:latest" \
+                ../
+              docker push "${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:$IMAGE_TAG"
+              docker push "${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:latest"
+            }
+
             if [ -n "$AGENT_POOL" ]; then
               echo "Using VNet agent pool: $AGENT_POOL (no firewall changes needed)"
               az acr build \
@@ -349,7 +365,7 @@ jobs:
                 --file Dockerfile.complete \
                 --timeout "$BUILD_TIMEOUT" \
                 --agent-pool "$AGENT_POOL" \
-                ../
+                ../ || docker_build_push
             else
               echo "No agent pool found — using public build with temporary firewall open"
               az acr update --name "$ACR_NAME" --default-action Allow --only-show-errors
@@ -361,7 +377,7 @@ jobs:
                 --image "${{ env.PROJECT_NAME }}-api:latest" \
                 --file Dockerfile.complete \
                 --timeout "$BUILD_TIMEOUT" \
-                ../
+                ../ || docker_build_push
               local build_rc=$?
               echo "Re-locking ACR firewall..."
               az acr update --name "$ACR_NAME" --default-action Deny --only-show-errors
@@ -387,12 +403,6 @@ jobs:
           fi
           
           echo "Image built and pushed: ${ACR_NAME}.azurecr.io/${{ env.PROJECT_NAME }}-api:$IMAGE_TAG"
-          
-          # Get ACR login server
-          ACR_LOGIN_SERVER=$(az acr show \
-            --name "$ACR_NAME" \
-            --resource-group "${{ env.RESOURCE_GROUP }}" \
-            --query "loginServer" -o tsv)
           
           if [ "$CA_EXISTS" == "true" ]; then
             # Update existing Container App
