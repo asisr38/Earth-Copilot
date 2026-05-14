@@ -490,6 +490,31 @@ jobs:
             # Create new Container App
             echo "Creating new Container App..."
             CA_NAME="ca-${{ env.PROJECT_NAME }}-api"
+
+            # Use a user-assigned identity so ACR pull access can be granted
+            # before the Container App is created.
+            IDENTITY_NAME="id-${{ env.PROJECT_NAME }}-containerapp"
+            echo "Ensuring user-assigned identity exists: $IDENTITY_NAME"
+            IDENTITY_ID=$(az identity show \
+              --name "$IDENTITY_NAME" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --query "id" -o tsv 2>/dev/null || echo "")
+            if [ -z "$IDENTITY_ID" ]; then
+              IDENTITY_ID=$(az identity create \
+                --name "$IDENTITY_NAME" \
+                --resource-group "${{ env.RESOURCE_GROUP }}" \
+                --location "${{ env.LOCATION }}" \
+                --query "id" -o tsv)
+            fi
+            IDENTITY_PRINCIPAL_ID=$(az identity show \
+              --name "$IDENTITY_NAME" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --query "principalId" -o tsv)
+            IDENTITY_CLIENT_ID=$(az identity show \
+              --name "$IDENTITY_NAME" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --query "clientId" -o tsv)
+            echo "Managed Identity Principal ID: $IDENTITY_PRINCIPAL_ID"
             
             # Get AI Foundry endpoint (AIServices is the new kind for AI Foundry)
             AZURE_OPENAI_NAME=$(az cognitiveservices account list --resource-group ${{ env.RESOURCE_GROUP }} --query "[?kind=='AIServices' || kind=='OpenAI'].name | [0]" -o tsv)
@@ -545,48 +570,13 @@ jobs:
               echo "  WARNING: No Azure Maps account found"
             fi
             
-            # STEP 1: Create Container App with a public placeholder image (no auth required)
-            # This avoids the chicken-and-egg problem where we need managed identity to pull
-            # from ACR, but managed identity doesn't exist until the app is created
-            echo "Creating Container App with placeholder image..."
-            az containerapp create \
-              --name "$CA_NAME" \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
-              --environment "$CAE_NAME" \
-              --image "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest" \
-              --target-port 80 \
-              --ingress external \
-              --cpu 1.0 \
-              --memory 2.0Gi \
-              --min-replicas 1 \
-              --max-replicas 3 \
-              --system-assigned \
-              --env-vars \
-                "PORT=8080" \
-                "STAC_API_URL=https://planetarycomputer.microsoft.com/api/stac/v1" \
-                "CORS_ORIGINS=*" \
-                "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}" \
-                "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_KEY}" \
-                "AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME}" \
-                "AZURE_OPENAI_FAST_DEPLOYMENT=${AZURE_OPENAI_FAST_DEPLOYMENT}" \
-                "AZURE_OPENAI_AVAILABLE_MODELS=${AZURE_OPENAI_AVAILABLE_MODELS}" \
-                "USE_MANAGED_IDENTITY=${USE_MANAGED_IDENTITY}" \
-                "AZURE_MAPS_SUBSCRIPTION_KEY=${AZURE_MAPS_KEY}" \
-              --output none
-            
-            echo "Container App created with placeholder image: $CA_NAME"
-            
-            # STEP 2: Get the managed identity principal ID (now that app exists)
-            CA_IDENTITY=$(az containerapp show --name "$CA_NAME" --resource-group ${{ env.RESOURCE_GROUP }} --query "identity.principalId" -o tsv)
-            echo "Managed Identity Principal ID: $CA_IDENTITY"
-            
-            # STEP 3: Configure Azure OpenAI access if using managed identity
+            # Configure Azure OpenAI access if using managed identity
             if [ "$USE_MANAGED_IDENTITY" == "true" ] && [ -n "$AZURE_OPENAI_NAME" ]; then
               echo "Configuring managed identity for Azure OpenAI..."
               OPENAI_ID=$(az cognitiveservices account show --name "$AZURE_OPENAI_NAME" --resource-group ${{ env.RESOURCE_GROUP }} --query "id" -o tsv)
               
               az role assignment create \
-                --assignee "$CA_IDENTITY" \
+                --assignee "$IDENTITY_PRINCIPAL_ID" \
                 --role "Cognitive Services OpenAI User" \
                 --scope "$OPENAI_ID" \
                 --output none 2>/dev/null || true
@@ -594,12 +584,12 @@ jobs:
               echo "Managed identity configured for Azure OpenAI"
             fi
             
-            # STEP 4: Grant AcrPull role to the Container App's managed identity
+            # Grant AcrPull role to the Container App's managed identity
             echo "Configuring managed identity for ACR pull..."
             ACR_ID=$(az acr show --name "$ACR_NAME" --resource-group ${{ env.RESOURCE_GROUP }} --query "id" -o tsv)
             
             az role assignment create \
-              --assignee "$CA_IDENTITY" \
+              --assignee "$IDENTITY_PRINCIPAL_ID" \
               --role "AcrPull" \
               --scope "$ACR_ID" \
               --output none 2>/dev/null || true
@@ -610,41 +600,10 @@ jobs:
             echo "Waiting 90 seconds for role assignment propagation..."
             sleep 90
             
-            # STEP 6: Configure the registry to use managed identity
-            echo "Configuring Container App to use managed identity for ACR..."
-            az containerapp registry set \
-              --name "$CA_NAME" \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
-              --server "$ACR_LOGIN_SERVER" \
-              --identity system \
-              --output none
-            
-            echo "Registry configured with managed identity"
-            
-            # STEP 7: Verify registry configuration before pulling
-            echo "Verifying registry authentication configuration..."
-            REGISTRY_CONFIG=$(az containerapp show \
-              --name "$CA_NAME" \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
-              --query "properties.configuration.registries[?server=='${ACR_LOGIN_SERVER}'].identity" \
-              -o tsv)
-            
-            if [ "$REGISTRY_CONFIG" != "system" ]; then
-              echo "WARNING: Registry identity not set to 'system', retrying..."
-              sleep 30
-              az containerapp registry set \
-                --name "$CA_NAME" \
-                --resource-group "${{ env.RESOURCE_GROUP }}" \
-                --server "$ACR_LOGIN_SERVER" \
-                --identity system \
-                --output none
-            fi
-            echo "Registry authentication verified: using system-assigned managed identity"
-            
-            # STEP 8: Verify managed identity has AcrPull role
+            # Verify managed identity has AcrPull role
             echo "Verifying AcrPull role assignment..."
             ROLE_EXISTS=$(az role assignment list \
-              --assignee "$CA_IDENTITY" \
+              --assignee "$IDENTITY_PRINCIPAL_ID" \
               --role "AcrPull" \
               --scope "$ACR_ID" \
               --query "[0].id" -o tsv 2>/dev/null || echo "")
@@ -654,26 +613,40 @@ jobs:
               sleep 60
               # Retry role assignment
               az role assignment create \
-                --assignee "$CA_IDENTITY" \
+                --assignee "$IDENTITY_PRINCIPAL_ID" \
                 --role "AcrPull" \
                 --scope "$ACR_ID" \
                 --output none 2>/dev/null || true
             fi
             echo "AcrPull role verified for managed identity"
             
-            # STEP 9: Now update the Container App with the actual image from ACR
-            echo "Updating Container App with actual image from ACR..."
-            az containerapp update \
+            echo "Creating Container App with actual image from ACR..."
+            az containerapp create \
               --name "$CA_NAME" \
               --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --environment "$CAE_NAME" \
               --image "${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:${IMAGE_TAG}" \
-              --output none
-
-            echo "Setting ingress target port to 8080..."
-            az containerapp ingress update \
-              --name "$CA_NAME" \
-              --resource-group "${{ env.RESOURCE_GROUP }}" \
               --target-port 8080 \
+              --ingress external \
+              --cpu 1.0 \
+              --memory 2.0Gi \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --user-assigned "$IDENTITY_ID" \
+              --registry-server "$ACR_LOGIN_SERVER" \
+              --registry-identity "$IDENTITY_ID" \
+              --env-vars \
+                "PORT=8080" \
+                "STAC_API_URL=https://planetarycomputer.microsoft.com/api/stac/v1" \
+                "CORS_ORIGINS=*" \
+                "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}" \
+                "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_KEY}" \
+                "AZURE_OPENAI_DEPLOYMENT_NAME=${AZURE_OPENAI_DEPLOYMENT_NAME}" \
+                "AZURE_OPENAI_FAST_DEPLOYMENT=${AZURE_OPENAI_FAST_DEPLOYMENT}" \
+                "AZURE_OPENAI_AVAILABLE_MODELS=${AZURE_OPENAI_AVAILABLE_MODELS}" \
+                "AZURE_CLIENT_ID=${IDENTITY_CLIENT_ID}" \
+                "USE_MANAGED_IDENTITY=${USE_MANAGED_IDENTITY}" \
+                "AZURE_MAPS_SUBSCRIPTION_KEY=${AZURE_MAPS_KEY}" \
               --output none
             
             echo "Container App updated with image: ${ACR_LOGIN_SERVER}/${{ env.PROJECT_NAME }}-api:${IMAGE_TAG}"
