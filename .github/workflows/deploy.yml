@@ -554,7 +554,7 @@ jobs:
               --resource-group "${{ env.RESOURCE_GROUP }}" \
               --environment "$CAE_NAME" \
               --image "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest" \
-              --target-port 8080 \
+              --target-port 80 \
               --ingress external \
               --cpu 1.0 \
               --memory 2.0Gi \
